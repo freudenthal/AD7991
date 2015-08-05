@@ -1,12 +1,17 @@
 #include "Arduino.h"
 #include "i2c_t3.h"
+#define combine(high,low) ( ( (uint16_t)(high << 8) ) | (uint16_t)(low) )
+#define lowbyte(value) ( (uint8_t)(value) )
+#define highbyte(value) ( (uint8_t)(value>>8) )
 #define MaxChannels 4
 #define InternalReference 2.5f
 #define DefaultAddress 40
+#define VoltageReferenceChannel 3
+#define I2CTimeout 1000;
 using namespace std;
 enum class sampleDelayMode{Unknown, On, Off};
 enum class i2CFilterMode{Unknown, On, Off};
-enum class referenceMode{Unknown, Internal, External};
+enum class referenceMode{Unknown, Supply, External};
 class AD7991
 {
 	public:
@@ -15,12 +20,14 @@ class AD7991
 		bool isConnected();
 		uint8_t getAddress();
 		void setAddress(uint8_t address);
-		float getVoltage(int Channel);
-		float* getVoltage(int* Channels, size_t NumberOfChannels);
-		int getVoltageInt(int Channel);
-		int* getVoltageInt(int* Channels, size_t NumberOfChannels);
-		bool setPower(int Channel, bool Active);
-		bool getPower(int Channel);
+		float getVoltageSingle(uint8_t Channel);
+		float* getVoltageMultiple(uint8_t DACsToUse);
+		float* getVoltageSingleRepeat(uint8_t Channel, size_t NumberOfRepeats);
+		float* getVoltageMultipleRepeat(uint8_t DACsToUse, size_t NumberOfRepeats);
+		uint16_t getVoltageSingleInt(uint8_t Channel);
+		uint16_t* getVoltageMultipleInt(uint8_t DACsToUse);
+		uint16_t* getVoltageSingleRepeatInt(uint8_t Channel, size_t NumberOfRepeats);
+		uint16_t* getVoltageMultipleRepeatInt(uint8_t DACsToUse, size_t NumberOfRepeats);
 		bool setI2CFilter(i2CFilterMode ModeSetting);
 		i2CFilterMode getI2CFilter();
 		bool setSampleDelayMode(sampleDelayMode ModeSetting);
@@ -31,29 +38,26 @@ class AD7991
 		float getVRefExt(); 
 	private:
 		uint8_t Address;
-		bool Power[MaxChannels];
-		float Voltage[MaxChannels];
-		int VoltageInt[MaxChannels];
 		referenceMode ReferenceMode;
 		i2CFilterMode I2CFilterMode;
 		sampleDelayMode SampleDelayMode;
-		uint8_t CommandByte;
+		uint8_t DACsActive;
+		uint8_t ConfigByte;
+		uint8_t PriorConfigByte;
 		uint8_t MSBByte;
 		uint8_t LSBByte;
+		bool NeedToUpdateConfigByte;
+		const uint8_t VRefChannel = VoltageReferenceChannel;
 		const float VRefInt = InternalReference;
 		float VRefExt;
 };
 AD7991::AD7991()
 {
-	I2CFilterMode = i2CFilterMode::Unknown;
-	ReferenceMode = referenceMode::Unknown;
-	SampleDelayMode = sampleDelayMode::Unknown;
+	I2CFilterMode = i2CFilterMode::On;
+	ReferenceMode = referenceMode::Supply;
+	SampleDelayMode = sampleDelayMode::On;
+	NeedToUpdateConfigByte = true;
 	Address = DefaultAddress;
-	for (int Index = 0; Index < NumberOfChannels; Index++)
-	{
-		Power[Index] = true;
-		Voltage[Index] = 0.0f;
-	}
 }
 AD7991::~AD7991()
 {
@@ -81,38 +85,61 @@ bool AD7991::isConnected()
 		return false;
 	}
 }
-float* AD7991::getVoltage(int* Channels, size_t NumberOfChannels)
+float AD7991::getVoltageSingle(uint8_t Channel)
 {
-	
+	UpdateChannelSingle(Channel);
 }
-float AD7991::getVoltage(int Channel)
+float* AD7991::getVoltageMultiple(uint8_t DACsToUse)
 {
-	Channel = constrain(Channel,0,NumberOfChannels);
+	uint8_t NumberOfChannelsToUse = UpdateChannelDACsActive(uint8_t NewDACsActive);
 }
-bool AD7991::setPower(int Channel, bool Active)
+float* AD7991::getVoltageSingleRepeat(uint8_t Channel, size_t NumberOfRepeats)
 {
-	Channel = constrain(Channel,0,NumberOfChannels);
+	UpdateChannelSingle(Channel);
 }
-bool AD7991::getPower(int Channel)
+float* AD7991::getVoltageMultipleRepeat(uint8_t DACsToUse, size_t NumberOfRepeats)
 {
-	Channel = constrain(Channel,0,NumberOfChannels);
-	return Power[Channel];
+	uint8_t NumberOfChannelsToUse = UpdateChannelDACsActive(uint8_t NewDACsActive);
+}
+uint16_t AD7991::getVoltageSingleInt(uint8_t Channel)
+{
+	UpdateChannelSingle(Channel);
+}
+uint16_t* AD7991::getVoltageMultipleInt(uint8_t DACsToUse)
+{
+	uint8_t NumberOfChannelsToUse = UpdateChannelDACsActive(uint8_t NewDACsActive);
+}
+uint16_t* AD7991::getVoltageSingleRepeatInt(uint8_t Channel, size_t NumberOfRepeats)
+{
+	UpdateChannelSingle(Channel);
+}
+uint16_t* AD7991::getVoltageMultipleRepeatInt(uint8_t DACsToUse, size_t NumberOfRepeats)
+{
+	uint8_t NumberOfChannelsToUse = UpdateChannelDACsActive(uint8_t NewDACsActive);
 }
 bool AD7991::setI2CFilter(i2CFilterMode ModeSetting)
 {
-
+	if (ModeSetting != I2CFilterMode)
+	{
+		I2CFilterMode = ModeSetting;
+		NeedToUpdateConfigByte = true;
+	}
 }
 i2CFilterMode AD7991::getI2CFilter()
 {
-
+	return I2CFilterMode;
 }
 bool AD7991::setSampleDelayMode(sampleDelayMode ModeSetting)
 {
-
+	if (ModeSetting != SampleDelayMode)
+	{
+		SampleDelayMode = ModeSetting;
+		NeedToUpdateConfigByte = true;
+	}
 }
 sampleDelayMode AD7991::getSampleDelayMode()
 {
-
+	return SampleDelayMode;
 }
 bool AD7991::setOutputMode(outputMode ModeSetting)
 {
@@ -124,7 +151,11 @@ outputMode AD7991::getOutputMode()
 }
 bool AD7991::setReference(referenceMode ModeSetting)
 {
-
+	if (ModeSetting != ReferenceMode)
+	{
+		ReferenceMode = ModeSetting;
+		NeedToUpdateConfigByte = true;
+	}
 }
 referenceMode AD7991::getReference()
 {
@@ -138,17 +169,89 @@ float AD7991::getVRefExt()
 {
 	return VRefExt;
 }
-void AD7991::ResetCommandByte()
+void AD7991::UpdateChannelSingle(uint8_t Channel)
 {
-	CommandByte = 0;
+	uint8_t NewDACsActive = 0;
+	Channel = CheckChannel(Channel);
+	bitWrite(NewDACsActive, Channel, 1);
+	if ( (NewDACsActive != DACsActive) | NeedToUpdateConfigByte)
+	{
+		NeedToUpdateConfigByte = true;
+		DACsActive = NewDACsActive;
+		UpdateConfigByte();
+	}
 }
-void AD7991::SetCommandByteAddress(uint8_t DACAddress)
+uint8_t AD7991::UpdateChannelDACsActive(uint8_t NewDACsActive)
 {
-	CommandByte = DACAddress;
+	if (bitRead(NewDACsActive,VRefChannel) & (ReferenceMode == referenceMode::External))
+	{
+		Serial.println("Can not use external reference with VRef channel on AD799X.");
+		bitWrite(NewDACsActive,VRefChannel,0);
+	}
+	if ( (NewDACsActive != DACsActive) | NeedToUpdateConfigByte)
+	{
+		NeedToUpdateConfigByte = true;
+		DACsActive = NewDACsActive;
+		UpdateConfigByte();
+	}
+	return (uint8_t)(bitRead(DACsActive,0) + bitRead(DACsActive,1) + bitRead(DACsActive,2) + bitRead(DACsActive,3));
 }
-void AD7991::SetCommandByteCommand(commandMode Command)
+uint8_t AD7991::CheckChannel(uint8_t Channel)
 {
-	CommandByte = ( (uint8_t)Command ) << 3;
+	Channel = constrain(Channel,0,NumberOfChannels);
+	if (Channel == VRefChannel)
+	{
+		if (ReferenceMode::External)
+		{
+			Serial.println("Can not use external reference with VRef channel on AD799X.");
+			return VRefChannel-1;
+		}
+	}
+	return Channel;
+}
+void AD7991::UpdateConfigByte()
+{
+	if (NeedToUpdateConfigByte)
+	{
+		SetConfigByte();
+		SendI2C();
+		NeedToUpdateConfigByte = false;
+	}
+}
+void AD7991::SetConfigByte()
+{
+	ConfigByte = DACsActive << 4;
+	switch(ReferenceMode)
+	{
+		case referenceMode::External:
+			bitWrite(ConfigByte,3,1);
+			break;
+		case referenceMode::Supply:
+		case referenceMode::Unknown:
+		case default:
+			break;
+	}
+	switch(I2CFilterMode)
+	{
+		case i2CFilterMode::Off:
+			bitWrite(ConfigByte,2,1);
+			break;
+		case i2CFilterMode::On:
+		case i2CFilterMode::Unknown:
+		case default:
+			break;
+	}
+	switch(SampleDelayMode)
+	{
+		case sampleDelayMode::Off:
+			bitWrite(ConfigByte,1,1);
+			bitWrite(ConfigByte,0,1);
+			break;
+		case sampleDelayMode::On:
+		case sampleDelayMode::Unknown:
+		case default:
+			break;
+	}
 }
 void AD7991::SendI2C()
 {
@@ -159,20 +262,17 @@ void AD7991::SendI2C()
   while (!MoveOn)
   {
 	Wire.beginTransmission(Address);
-	Wire.write(CommandByte);
-	Wire.write(MSBByte);
-	Wire.write(LSBByte);
-	SendSuccess = Wire.endTransmission(I2C_STOP,I2CTimeout);
+	Wire.write(ConfigByte);
+	SendSuccess = Wire.endTransmission(I2C_STOP, I2CTimeout);
     if(SendSuccess != 0)
     {
-      Wire.getError();
       Wire.finish();
       Wire.resetBus();
       CurrentAttempt++;
       if (CurrentAttempt > MaxAttempts)
       {
         MoveOn = true;
-        Serial.println("Unrecoverable I2C transmission error.");
+        Serial.println("Unrecoverable I2C transmission error with AD799X.");
       }
     }
     else
@@ -181,18 +281,11 @@ void AD7991::SendI2C()
     }
   }
 }
-void AD7991::RecieveI2C(byte Address, int NumberOfBytes)
+void AD7991::RecieveI2CInt(size_t NumberOfSamples)
 {
-  if(NumberOfBytes > I2CRecieveBufferSize)
+  if(NumberOfSamples > 0)
   {
-    NumberOfBytes = I2CRecieveBufferSize;
-  }
-  if(NumberOfBytes > 0)
-  {
-    digitalWrite(LEDPin,HIGH);
-    //Wire.beginTransmission(Address);
-    //Wire.endTransmission(I2C_NOSTOP,I2CTimeout);
-    Wire.requestFrom(Address, NumberOfBytes, I2C_STOP,I2CTimeout);
+    Wire.requestFrom(Address, 2*NumberOfSamples, I2C_STOP, I2CTimeout*2*NumberOfSamples);
     int BytesToCollect = Wire.available();
     for (int RecieveByteNumber=0; RecieveByteNumber < BytesToCollect; RecieveByteNumber++)
     {
@@ -205,6 +298,24 @@ void AD7991::RecieveI2C(byte Address, int NumberOfBytes)
         Wire.readByte();
       }
     }
-    digitalWrite(LEDPin,LOW);
+  }
+}
+void AD7991::RecieveI2CFloat(size_t NumberOfSamples)
+{
+  if(NumberOfSamples > 0)
+  {
+    Wire.requestFrom(Address, 2*NumberOfSamples, I2C_STOP, I2CTimeout*2*NumberOfSamples);
+    int BytesToCollect = Wire.available();
+    for (int RecieveByteNumber=0; RecieveByteNumber < BytesToCollect; RecieveByteNumber++)
+    {
+      if(RecieveByteNumber<I2CRecieveBufferSize)
+      {
+        I2CRecieveBuffer[RecieveByteNumber] = Wire.readByte();
+      }
+      else
+      {
+        Wire.readByte();
+      }
+    }
   }
 }

@@ -8,6 +8,9 @@
 #define DefaultAddress 40
 #define VoltageReferenceChannel 3
 #define I2CTimeout 1000;
+//LowByteShift changes across the AD799X family.
+// For AD7991, 0 shift. For AD7995, 2 shift. For AD7999, 4 shift.
+#define LowByteShift 0;
 using namespace std;
 enum class sampleDelayMode{Unknown, On, Off};
 enum class i2CFilterMode{Unknown, On, Off};
@@ -21,13 +24,13 @@ class AD7991
 		uint8_t getAddress();
 		void setAddress(uint8_t address);
 		float getVoltageSingle(uint8_t Channel);
-		float* getVoltageMultiple(uint8_t DACsToUse);
-		float* getVoltageSingleRepeat(uint8_t Channel, size_t NumberOfRepeats);
-		float* getVoltageMultipleRepeat(uint8_t DACsToUse, size_t NumberOfRepeats);
+		void getVoltageMultiple(float* Data, uint8_t DACsToUse);
+		void getVoltageSingleRepeat(float* Data, uint8_t Channel, size_t NumberOfRepeats);
+		void getVoltageMultipleRepeat(float* Data, uint8_t DACsToUse, size_t NumberOfRepeats);
 		uint16_t getVoltageSingleInt(uint8_t Channel);
-		uint16_t* getVoltageMultipleInt(uint8_t DACsToUse);
-		uint16_t* getVoltageSingleRepeatInt(uint8_t Channel, size_t NumberOfRepeats);
-		uint16_t* getVoltageMultipleRepeatInt(uint8_t DACsToUse, size_t NumberOfRepeats);
+		void getVoltageMultipleInt(uint16_t* Data, uint8_t DACsToUse);
+		void getVoltageSingleRepeatInt(uint16_t* Data, uint8_t Channel, size_t NumberOfRepeats);
+		void getVoltageMultipleRepeatInt(uint16_t* Data, uint8_t DACsToUse, size_t NumberOfRepeats);
 		bool setI2CFilter(i2CFilterMode ModeSetting);
 		i2CFilterMode getI2CFilter();
 		bool setSampleDelayMode(sampleDelayMode ModeSetting);
@@ -35,7 +38,8 @@ class AD7991
 		bool setReference(referenceMode ModeSetting);
 		referenceMode getReference();
 		void setVRefExt(float VRef);
-		float getVRefExt(); 
+		float getVRefExt();
+		float getVRef();
 	private:
 		uint8_t Address;
 		referenceMode ReferenceMode;
@@ -88,34 +92,57 @@ bool AD7991::isConnected()
 float AD7991::getVoltageSingle(uint8_t Channel)
 {
 	UpdateChannelSingle(Channel);
+	float CurrentData;
+	RecieveI2CFloat(&CurrentData, 1);
+	return CurrentData;
 }
-float* AD7991::getVoltageMultiple(uint8_t DACsToUse)
+void AD7991::getVoltageMultiple(float* Data, uint8_t DACsToUse)
 {
 	uint8_t NumberOfChannelsToUse = UpdateChannelDACsActive(uint8_t NewDACsActive);
+	RecieveI2CFloat(Data, (size_t)NumberOfChannelsToUse);
 }
-float* AD7991::getVoltageSingleRepeat(uint8_t Channel, size_t NumberOfRepeats)
+void AD7991::getVoltageSingleRepeat(float* Data, uint8_t Channel, size_t NumberOfRepeats)
 {
 	UpdateChannelSingle(Channel);
+	RecieveI2CFloat(Data, NumberOfRepeats);
 }
-float* AD7991::getVoltageMultipleRepeat(uint8_t DACsToUse, size_t NumberOfRepeats)
+void AD7991::getVoltageMultipleRepeat(float* Data, uint8_t DACsToUse, size_t NumberOfRepeats)
 {
 	uint8_t NumberOfChannelsToUse = UpdateChannelDACsActive(uint8_t NewDACsActive);
+	RecieveI2CFloat(Data, (size_t)NumberOfChannelsToUse * NumberOfRepeats);
 }
 uint16_t AD7991::getVoltageSingleInt(uint8_t Channel)
 {
 	UpdateChannelSingle(Channel);
+	int CurrentData;
+	RecieveI2CInt(&CurrentData, 1);
+	return CurrentData;
 }
-uint16_t* AD7991::getVoltageMultipleInt(uint8_t DACsToUse)
+void AD7991::getVoltageMultipleInt(uint16_t* Data, uint8_t DACsToUse)
 {
 	uint8_t NumberOfChannelsToUse = UpdateChannelDACsActive(uint8_t NewDACsActive);
+	RecieveI2CInt(Data, (size_t)NumberOfChannelsToUse);
 }
-uint16_t* AD7991::getVoltageSingleRepeatInt(uint8_t Channel, size_t NumberOfRepeats)
+void AD7991::getVoltageSingleRepeatInt(uint16_t* Data, uint8_t Channel, size_t NumberOfRepeats)
 {
 	UpdateChannelSingle(Channel);
+	RecieveI2CInt(Data, NumberOfRepeats);
 }
-uint16_t* AD7991::getVoltageMultipleRepeatInt(uint8_t DACsToUse, size_t NumberOfRepeats)
+void AD7991::getVoltageMultipleRepeatInt(uint16_t* Data, uint8_t DACsToUse, size_t NumberOfRepeats)
 {
 	uint8_t NumberOfChannelsToUse = UpdateChannelDACsActive(uint8_t NewDACsActive);
+	RecieveI2CInt(Data, (size_t)NumberOfChannelsToUse * NumberOfRepeats);
+}
+float AD7991::getVRef()
+{
+	switch(ReferenceMode)
+	{
+		case referenceMode::Internal:
+			return VRefInt;
+		case referenceMode::Supply:
+		case default:
+			return VRefExt;
+	}
 }
 bool AD7991::setI2CFilter(i2CFilterMode ModeSetting)
 {
@@ -281,41 +308,50 @@ void AD7991::SendI2C()
     }
   }
 }
-void AD7991::RecieveI2CInt(size_t NumberOfSamples)
+size_t AD7991::RecieveI2CInt(uint16_t* Data, size_t NumberOfSamples)
 {
   if(NumberOfSamples > 0)
   {
     Wire.requestFrom(Address, 2*NumberOfSamples, I2C_STOP, I2CTimeout*2*NumberOfSamples);
     int BytesToCollect = Wire.available();
-    for (int RecieveByteNumber=0; RecieveByteNumber < BytesToCollect; RecieveByteNumber++)
+    int CurrentIndex = 0;
+    while (Wire.available())
     {
-      if(RecieveByteNumber<I2CRecieveBufferSize)
-      {
-        I2CRecieveBuffer[RecieveByteNumber] = Wire.readByte();
-      }
-      else
-      {
-        Wire.readByte();
-      }
-    }
+	    MSBByte = Wire.readByte();
+	    LSBByte = Wire.readByte();
+	    //uint8_t CurrentChannel = MSBByte >> 4;
+	    uint16_t CurrentValue = combine( ((MSBByte << 4)>>4), LSBByte ) >> LowByteShift;
+	    Data[CurrentIndex] = CurrentValue;
+	    CurrentIndex++;
+	}
+	return CurrentIndex;
+  }
+  else
+  {
+  	return 0;
   }
 }
-void AD7991::RecieveI2CFloat(size_t NumberOfSamples)
+size_t AD7991::RecieveI2CFloat(float* Data, size_t NumberOfSamples)
 {
   if(NumberOfSamples > 0)
   {
+  	float MaxValue = (float)((((uint16_t)-1)>>4)>>LowByteShift);
     Wire.requestFrom(Address, 2*NumberOfSamples, I2C_STOP, I2CTimeout*2*NumberOfSamples);
     int BytesToCollect = Wire.available();
-    for (int RecieveByteNumber=0; RecieveByteNumber < BytesToCollect; RecieveByteNumber++)
+    int CurrentIndex = 0;
+    while (Wire.available())
     {
-      if(RecieveByteNumber<I2CRecieveBufferSize)
-      {
-        I2CRecieveBuffer[RecieveByteNumber] = Wire.readByte();
-      }
-      else
-      {
-        Wire.readByte();
-      }
-    }
+	    MSBByte = Wire.readByte();
+	    LSBByte = Wire.readByte();
+	    //uint8_t CurrentChannel = MSBByte >> 4;
+	    uint16_t CurrentValue = combine( ((MSBByte << 4)>>4), LSBByte ) >> LowByteShift;
+	    Data[CurrentIndex] = getVRef()*((float)CurrentValue)/MaxValue;
+	    CurrentIndex++;
+	}
+	return CurrentIndex;
+  }
+  else
+  {
+  	return 0;
   }
 }
